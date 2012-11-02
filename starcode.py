@@ -4,7 +4,8 @@
 
 import sys
 import gc
-import json
+import Queue
+import multiprocessing
 
 from collections import defaultdict
 
@@ -17,11 +18,16 @@ class MaxDistExceeded(Exception):
    pass
 
 
-def comp(seq1, seq2, maxdist):
+def comp(seq1, seq2, maxdist, Npen):
    """'seq1' has to be longer than 'seq2'."""
    dist = 0
    for i in range(len(seq2)):
-      dist += seq1[i] != seq2[i]
+      if seq1[i] == 'N' or seq2[i] == 'N':
+         dist += Npen
+      elif seq1[i] == seq2[i]:
+         continue
+      else:
+         dist += 1
       if dist > maxdist:
          raise MaxDistExceeded
    return dist
@@ -99,7 +105,7 @@ class seqTrie(object):
          for newdepth,newnode in self.walk(child,depth+1):
             yield newdepth,newnode
 
-   def search(self, seq, node=None, maxdist=0):
+   def search(self, seq, node=None, maxdist=0, Npen=.251):
       """Depth-first iterator that returns all the matches to a
       query sequence in the seqTrie with a distance less than or
       equal to the specified max."""
@@ -107,7 +113,7 @@ class seqTrie(object):
       if node is None: node = self.root
       for child in node.children:
          try:
-            dist = comp(seq, child.subseq, maxdist)
+            dist = comp(seq, child.subseq, maxdist, Npen)
          except MaxDistExceeded:
             # Max distance exceeded: no need to go deeper.
             continue
@@ -154,6 +160,42 @@ class seqTrie(object):
          if gc_was_initially_enabled: gc.enable()
       return trie
 
+class searchThread(multiprocessing.Process):
+   def __init__(self, trie, queuelock, nodelock, queue, nodes, **args):
+      self.trie = trie
+      self.queuelock = queuelock
+      self.nodelock = nodelock
+      self.queue = queue
+      self.nodes = nodes
+      self.args = args
+      multiprocessing.Process.__init__(self)
+
+   def run(self):
+      """Pure side effect fuction that updates the 'nodes' dictionary
+      in place."""
+
+      while True:
+         self.queuelock.acquire()
+         try:
+            item = queue.get_nowait()
+         except Queue.Empty:
+            return
+         finally:
+            self.queuelock.release()
+
+         left = '%s:%d' % item
+         self.nodelock.acquire()
+         self.nodes[left] = []
+         self.nodelock.release()
+         for hit in self.trie.search(item[0], **self.args):
+            right = '%s:%d' % hit
+            # Prevent cycles in the graph.
+            if left < right:
+               self.nodelock.acquire()
+               self.nodes[left] += [right]
+               self.nodelock.release()
+         self.queue.task_done()
+
 
 if __name__ == '__main__':
    sequences = defaultdict(int)
@@ -166,14 +208,39 @@ if __name__ == '__main__':
    trie = seqTrie.build_from_dict(sequences)
 
    sys.stderr.write('matching pairs\n')
-   nodes = {}
+
+   queuelock = multiprocessing.Lock()
+   nodelock = multiprocessing.Lock()
+   queue = multiprocessing.JoinableQueue(-1)
+   manager = multiprocessing.Manager()
+   nodes_ = manager.dict()
+   
    for item in sequences.items():
-      left = '%s:%d' % item
-      nodes[left] = []
-      for hit in trie.search(item[0], maxdist=2):
-         right = '%s:%d' % hit
-         # Prevent cycles in the graph.
-         if left < right: nodes[left].append(right)
+      queue.put_nowait(item)
+
+   processes = [
+      searchThread(
+         trie = trie,
+         queuelock = queuelock,
+         nodelock = nodelock,
+         queue = queue,
+         nodes = nodes_,
+         maxdist = 2,
+         Npen = .251
+      ) for i in range(6)
+   ]
+
+   for process in processes:
+      process.start()
+      sys.stderr.write('starting process %d\n' % process.pid)
+   queue.join()
+
+   # The class 'manager.dict' shares only part of the 'dict'
+   # interface, which causes the following operations to crash.
+   nodes = {}
+   for node in nodes_.keys():
+      nodes[node] = nodes_[node]
+   del(nodes_)
 
    sys.stderr.write('writing pair file\n')
    with open('pairs.txt', 'w') as f:
@@ -183,7 +250,7 @@ if __name__ == '__main__':
 
    sys.stderr.write('writing seq file\n')
    with open('seq.txt', 'w') as f:
-      for node in nodes:
+      for node in nodes.keys():
          f.write(node + '\n')
 
    sys.stderr.write('finding connected components\n')
