@@ -105,7 +105,7 @@ class seqTrie(object):
          for newdepth,newnode in self.walk(child,depth+1):
             yield newdepth,newnode
 
-   def search(self, seq, node=None, maxdist=0, Npen=.251):
+   def search(self, seq, node=None, maxdist=0, Npen=1):
       """Depth-first iterator that returns all the matches to a
       query sequence in the seqTrie with a distance less than or
       equal to the specified max."""
@@ -226,7 +226,6 @@ if __name__ == '__main__':
          queue = queue,
          nodes = nodes_,
          maxdist = 2,
-         Npen = .251
       ) for i in range(6)
    ]
 
