@@ -7,6 +7,7 @@ import gc
 import Queue
 import multiprocessing
 
+from math import lgamma, log
 from collections import defaultdict
 
 class DupSeq(Exception):
@@ -174,6 +175,24 @@ class searchThread(multiprocessing.Process):
       """Pure side effect fuction that updates the 'nodes' dictionary
       in place."""
 
+      class logProbCache:
+         """Compute log prob of binomial variables and store
+         the result for later use (for speed)."""
+
+         # Assume a binomial distribution with parameter p = 0.01.
+         B = log(0.01)-log(.99)
+         A = log(.99)
+
+         terms = {}
+
+         def __call__(self, k, n):
+            return self.terms.setdefault(
+               (k,n), # Index 'terms' by '(k,n)'.
+               lgamma(n+1)-lgamma(k+1)-lgamma(n-k+1)+n*self.A+k*self.B
+            )
+
+      lbinom = logProbCache()
+
       while True:
          self.queuelock.acquire()
          try:
@@ -187,7 +206,12 @@ class searchThread(multiprocessing.Process):
          self.nodelock.acquire()
          self.nodes[left] = []
          self.nodelock.release()
-         for hit in self.trie.search(item[0], **self.args):
+
+         # Compute the expected max edit distance.
+         (k, n, const) = (len(item[0]), 1, log(item[1]))
+         while lbinom(k,n) + const > 0:
+            k += 1
+         for hit in self.trie.search(item[0], maxdist=k):
             right = '%s:%d' % hit
             # Prevent cycles in the graph.
             if left < right:
